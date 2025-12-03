@@ -1,14 +1,45 @@
-// TypeScript type definitions for Writing Improvement System
+// Unified Type Definitions for Writing Improvement System
+// Single source of truth for all TypeScript interfaces
+
+// ============================================================================
+// Core Message & Parsing Types
+// ============================================================================
+
+export interface ParsedMessage {
+  id: string;
+  text: string;
+  timestamp: number;
+  conversationId: number;
+  conversationTitle: string;
+}
 
 export interface Message {
   id: string;
   text: string;
-  metadata: {
-    conversation_id: number;
-    conversation_title: string;
-    timestamp: number;
-  };
 }
+
+export interface ParseOptions {
+  startConversation?: number;  // 1-indexed
+  endConversation?: number;    // 1-indexed (inclusive)
+  afterTimestamp?: number;     // Unix timestamp
+}
+
+export interface ChatLogMetadata {
+  totalConversations: number;
+  estimatedMessages: number;
+  dateRange: { 
+    earliest: Date | null; 
+    latest: Date | null;
+    earliestTimestamp: number;
+    latestTimestamp: number;
+  };
+  conversationTitles: string[];
+  sampleMessages: number;
+}
+
+// ============================================================================
+// Evaluation & Analysis Types
+// ============================================================================
 
 export interface EvaluationResult {
   message_id: string;
@@ -28,7 +59,7 @@ export interface Issue {
   recommendation: string;
 }
 
-export interface AnalysisData {
+export interface Analysis {
   summary: {
     total_messages: number;
     avg_grammar_score: number;
@@ -41,28 +72,19 @@ export interface AnalysisData {
   top_tone_issues: Issue[];
 }
 
+// ============================================================================
+// Practice Session Types
+// ============================================================================
+
 export interface PracticeQuestion {
   question_id: string;
-  issue_type: 'grammar' | 'punctuation' | 'tone' | 'comprehensive';
+  issue_type: string;
   specific_issue: string;
   question_format: 'correction' | 'multiple_choice' | 'writing_prompt';
   question_text: string;
   correct_answer: string;
   options?: string[];
   explanation: string;
-}
-
-export interface PracticeSession {
-  session_id: string;
-  session_number: number;
-  date: string;
-  focus: string;
-  duration_minutes: number;
-  questions: PracticeQuestion[];
-  user_answers?: { [key: string]: string };
-  grading_results?: GradingResult[];
-  score?: number;
-  completed: boolean;
 }
 
 export interface GradingResult {
@@ -74,6 +96,72 @@ export interface GradingResult {
   explanation: string;
   grading_method: 'programmatic' | 'similarity' | 'llm';
 }
+
+export interface PracticeSession {
+  session_id: string;
+  session_number: number;
+  date: string;
+  focus: string;
+  questions: PracticeQuestion[];
+  user_answers: { [key: string]: string };
+  grading_results?: GradingResult[];
+  score?: number;
+  completed: boolean;
+}
+
+// ============================================================================
+// Progress & Metadata Types
+// ============================================================================
+
+export interface ProcessingProgress {
+  current: number;
+  total: number;
+  stage: string;
+  estimatedTimeRemaining?: number;
+}
+
+export interface BaselineMetadata {
+  evaluation_id: string;
+  evaluation_date: string;
+  total_messages_evaluated: number;
+  earliest_message_timestamp: number;
+  latest_message_timestamp: number;
+  message_ids_evaluated: string[];
+  cost_estimate: number;
+  conversations_evaluated: number;
+}
+
+// ============================================================================
+// App State & Navigation Types
+// ============================================================================
+
+export type ViewType = 'setup' | 'evaluation' | 'practice' | 'dashboard' | 'reevaluation';
+
+export interface AppState {
+  // Current navigation
+  currentView: ViewType;
+  
+  // Step 1: Initial Evaluation
+  baselineAnalysis?: Analysis;
+  baselineEvaluations?: EvaluationResult[];
+  baselineMetadata?: BaselineMetadata;
+  
+  // Step 2: Practice Sessions
+  practiceSessions: PracticeSession[];
+  
+  // Step 3: Re-Evaluation
+  followupAnalysis?: Analysis;
+  followupEvaluations?: EvaluationResult[];
+  followupMetadata?: BaselineMetadata;
+  
+  // Metadata
+  created_at: string;
+  last_updated: string;
+}
+
+// ============================================================================
+// Learning Plan Types (for future use)
+// ============================================================================
 
 export interface LearningPlan {
   created_date: string;
@@ -95,44 +183,4 @@ export interface LearningPlan {
     duration_minutes: number;
   }>;
   session_plans: PracticeSession[];
-}
-
-export interface BaselineMetadata {
-  evaluation_id: string;
-  evaluation_date: string;
-  total_messages_evaluated: number;
-  earliest_message_timestamp: number;
-  latest_message_timestamp: number;
-  message_ids_evaluated: string[];
-  cost_estimate: number;
-}
-
-export interface AppState {
-  // Step 1: Initial Evaluation
-  baseline_analysis?: AnalysisData;
-  baseline_evaluations?: EvaluationResult[];
-  baseline_metadata?: BaselineMetadata;
-  
-  // Step 2: Learning Plan
-  learning_plan?: LearningPlan;
-  
-  // Step 3: Practice Sessions
-  practice_sessions: PracticeSession[];
-  
-  // Step 4: Re-Evaluation
-  followup_analysis?: AnalysisData;
-  followup_evaluations?: EvaluationResult[];
-  followup_metadata?: BaselineMetadata;
-  
-  // Metadata
-  created_at: string;
-  last_updated: string;
-  current_step: 'upload' | 'evaluation' | 'practice' | 'reevaluation' | 'complete';
-}
-
-export interface ProcessingProgress {
-  current: number;
-  total: number;
-  stage: string;
-  estimatedTimeRemaining?: number;
 }

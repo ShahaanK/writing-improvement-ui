@@ -1,5 +1,6 @@
 // Parse OpenAI chat export format
 // Handles the complex nested mapping structure
+// Matches reference implementation: lines 50-328 in writing_evaluation.py
 
 export interface ParsedMessage {
   id: string;
@@ -15,12 +16,81 @@ export interface ParseOptions {
   afterTimestamp?: number;     // Unix timestamp
 }
 
+export interface ChatLogMetadata {
+  totalConversations: number;
+  estimatedMessages: number;
+  dateRange: { 
+    earliest: Date | null; 
+    latest: Date | null;
+    earliestTimestamp: number;
+    latestTimestamp: number;
+  };
+  conversationTitles: string[];
+  sampleMessages: number;
+}
+
+/**
+ * Get metadata about chat logs without parsing all messages
+ * Fast preview to help user select conversation range
+ */
+export function getChatLogMetadata(jsonData: any): ChatLogMetadata {
+  const logs = Array.isArray(jsonData) ? jsonData : [];
+  
+  let earliestTime = Infinity;
+  let latestTime = 0;
+  let messageCount = 0;
+  const conversationTitles: string[] = [];
+  
+  // Sample first 10 conversations to estimate total messages
+  const sampleSize = Math.min(10, logs.length);
+  const sample = logs.slice(0, sampleSize);
+  
+  // Collect titles from all conversations
+  logs.forEach(conv => {
+    const title = conv.title || 'Untitled';
+    conversationTitles.push(title);
+  });
+  
+  // Count messages in sample
+  sample.forEach(conv => {
+    const mapping = conv.mapping || {};
+    Object.values(mapping).forEach((node: any) => {
+      const msg = node.message;
+      if (msg?.author?.role === 'user' && msg?.create_time) {
+        messageCount++;
+        earliestTime = Math.min(earliestTime, msg.create_time);
+        latestTime = Math.max(latestTime, msg.create_time);
+      }
+    });
+  });
+  
+  // Estimate total messages based on sample
+  const avgMessagesPerConv = messageCount / sampleSize;
+  const estimatedTotal = Math.round(avgMessagesPerConv * logs.length);
+  
+  return {
+    totalConversations: logs.length,
+    estimatedMessages: estimatedTotal,
+    dateRange: {
+      earliest: earliestTime !== Infinity ? new Date(earliestTime * 1000) : null,
+      latest: latestTime !== 0 ? new Date(latestTime * 1000) : null,
+      earliestTimestamp: earliestTime !== Infinity ? earliestTime : 0,
+      latestTimestamp: latestTime !== 0 ? latestTime : 0
+    },
+    conversationTitles: conversationTitles,
+    sampleMessages: messageCount
+  };
+}
+
 /**
  * Parse OpenAI chat logs and extract user messages
+ * Matches reference implementation: lines 50-117 in writing_evaluation.py
+ * Now supports conversation range selection
  */
 export function parseChatLogs(
   jsonData: any,
-  options: ParseOptions = {}
+  options: ParseOptions = {},
+  onProgress?: (status: string, current: number, total: number) => void
 ): ParsedMessage[] {
   const logs = Array.isArray(jsonData) ? jsonData : [];
   const messages: ParsedMessage[] = [];
@@ -30,12 +100,28 @@ export function parseChatLogs(
   const endIdx = options.endConversation ? options.endConversation : logs.length;
   const selectedLogs = logs.slice(startIdx, endIdx);
   
-  console.log(`Parsing conversations ${startIdx + 1} to ${endIdx} (${selectedLogs.length} total)`);
+  if (onProgress) {
+    onProgress(
+      `Parsing conversations ${startIdx + 1} to ${endIdx}...`,
+      0,
+      selectedLogs.length
+    );
+  }
+  
+  console.log(`📚 Parsing ${selectedLogs.length} conversations (${startIdx + 1} to ${endIdx})`);
   
   selectedLogs.forEach((conversation, convIdx) => {
     const mapping = conversation.mapping || {};
     const conversationTitle = conversation.title || 'Untitled';
     const actualConvIdx = startIdx + convIdx;
+    
+    if (onProgress && convIdx % 10 === 0) {
+      onProgress(
+        `Processing conversation ${convIdx + 1}/${selectedLogs.length}: "${conversationTitle.substring(0, 30)}..."`,
+        convIdx,
+        selectedLogs.length
+      );
+    }
     
     // Iterate through all nodes in mapping
     Object.values(mapping).forEach((node: any) => {
@@ -50,7 +136,7 @@ export function parseChatLogs(
           return;
         }
         
-        // Extract text from parts array
+        // Extract text from parts array (matches reference lines 76-86)
         if (content.parts && Array.isArray(content.parts)) {
           const textParts: string[] = [];
           
@@ -82,29 +168,226 @@ export function parseChatLogs(
     });
   });
   
-  console.log(`Extracted ${messages.length} user messages`);
+  if (onProgress) {
+    onProgress(
+      `✓ Extracted ${messages.length} user messages from ${selectedLogs.length} conversations`,
+      selectedLogs.length,
+      selectedLogs.length
+    );
+  }
+  
+  console.log(`✓ Extracted ${messages.length} user messages`);
   return messages;
 }
 
 /**
- * Get metadata about chat logs without parsing all messages
+ * Filter messages using heuristics (Stage 1)
+ * Identifies messages that appear to be writing-related
+ * PERMISSIVE: Minimize false negatives - let LLM make final call
+ * 
+ * Matches reference implementation: lines 119-328 in writing_evaluation.py
+ * Strategy: Pass anything that MIGHT be writing-related
  */
-export function getChatLogMetadata(jsonData: any): {
-  totalConversations: number;
+export function filterMessagesHeuristic(
+  messages: ParsedMessage[],
+  onProgress?: (status: string, current: number, total: number) => void
+): ParsedMessage[] {
+  if (onProgress) {
+    onProgress('🔍 Stage 1: Permissive heuristic filtering...', 0, messages.length);
+  }
+  
+  console.log(`🔍 Stage 1 Filtering: ${messages.length} messages (PERMISSIVE STRATEGY)`);
+  console.log('Strategy: Pass anything that MIGHT be writing-related');
+  
+  // Strong indicators of writing-related content (reference lines 129-153)
+  const writingKeywords = [
+    // Core writing & editing
+    'write', 'writing', 'edit', 'editing', 'proofread', 'revise',
+    'revision', 'rewrite', 'rephrase', 'grammar', 'punctuation',
+    'tone', 'sentence', 'paragraph', 'draft', 'feedback', 'format',
+
+    // Academic writing
+    'essay', 'paper', 'report', 'document', 'analysis', 'argument',
+    'summary', 'thesis', 'dissertation', 'abstract', 'introduction',
+    'conclusion', 'reflection', 'response', 'notes', 'jot notes',
+    'chapter summary', 'quote integration', 'bibliography',
+    'reference', 'citation', 'cite', 'peer review', 'manuscript',
+    'publication', 'academic', 'formal', 'professional',
+
+    // Creative writing
+    'story', 'scene', 'narrative', 'creative', 'prompt',
+
+    // Professional writing
+    'email', 'letter', 'cover letter', 'linkedin', 'message',
+    'statement', 'personal statement', 'supplementary essay',
+    'application writing', 'proposal', 'presentation', 'speech',
+
+    // Common writing task phrases
+    'expand', 'shorten', 'make it human', 'sound more human'
+  ];
+  
+  // Only filter EXTREMELY obvious non-writing content (reference lines 156-186)
+  const excludeKeywords = [
+    // Coding & technical
+    'debug this code', 'syntax error', 'compile error', 'stack trace',
+    'test coverage', 'unit test', 'function definition',
+    'code', 'python', 'javascript', 'sql', 'html', 'css', 'racket',
+    'algorithm', 'compute', 'compile', 'schema', 'erd', 'erd diagram',
+    'normal form', '1nf', '2nf', '3nf', 'query',
+
+    // Math / calculation
+    'solve for x', 'calculate the', 'find the derivative',
+    'solve this equation', 'what is the integral',
+    'limit', 'derivative', 'vector', 'matrix', 'complex number',
+
+    // Physics / science
+    'velocity', 'acceleration', 'force', 'momentum', 'energy',
+    'projectile', 'work', 'kinetic', 'potential',
+    'molecule', 'reaction', 'glycolysis', 'atp',
+
+    // Fitness
+    'workout routine', 'sets and reps', 'bench press program',
+    'workout', 'squat', 'deadlift', 'reps', 'sets', 'cardio',
+
+    // Tests & quizzes
+    'quiz', 'test', 'multiple choice', 'practice problems',
+    'solve for', 'answer key',
+
+    // Entertainment
+    'recipe for', 'how to cook', 'movie recommendation',
+    'game walkthrough', 'song lyrics', 'game', 'movie', 'song', 'video'
+  ];
+  
+  const filtered: ParsedMessage[] = [];
+  const stats = {
+    too_short: 0,
+    obvious_non_writing: 0,
+    has_writing_keywords: 0,
+    looks_like_prose: 0
+  };
+  
+  messages.forEach((msg, idx) => {
+    if (onProgress && idx % 50 === 0) {
+      onProgress(
+        `Analyzing message ${idx + 1}/${messages.length}...`,
+        idx,
+        messages.length
+      );
+    }
+    
+    const text = msg.text.toLowerCase();
+    const wordCount = msg.text.split(/\s+/).length;
+    
+    // Only filter extremely short messages (reference line 195)
+    if (wordCount < 10) {
+      stats.too_short++;
+      return;
+    }
+    
+    // PRIORITY 1: If mentions writing explicitly, KEEP IT (reference lines 197-202)
+    const hasWritingKeywords = writingKeywords.some(kw => text.includes(kw));
+    if (hasWritingKeywords) {
+      filtered.push(msg);
+      stats.has_writing_keywords++;
+      return; // Skip all other checks
+    }
+    
+    // PRIORITY 2: Check for OBVIOUS non-writing only (reference lines 204-208)
+    const isObviouslyNotWriting = excludeKeywords.some(kw => text.includes(kw));
+    if (isObviouslyNotWriting) {
+      stats.obvious_non_writing++;
+      return;
+    }
+    
+    // PRIORITY 3: Keep anything that looks like prose/formal text (reference lines 210-220)
+    // Be very permissive - let Stage 2 (LLM) make final call
+    const hasPunctuation = msg.text.includes('.');
+    const multipleSentences = (msg.text.match(/\./g) || []).length >= 2;
+    const longEnough = wordCount >= 15; // Permissive threshold
+    const hasQuestionMark = msg.text.includes('?');
+    
+    if ((hasPunctuation && longEnough) || multipleSentences || (hasQuestionMark && wordCount >= 15)) {
+      filtered.push(msg);
+      stats.looks_like_prose++;
+    }
+  });
+  
+  const passRate = (filtered.length / messages.length) * 100;
+  
+  if (onProgress) {
+    onProgress(
+      `✓ Stage 1: ${filtered.length}/${messages.length} passed (${passRate.toFixed(1)}% - permissive)`,
+      messages.length,
+      messages.length
+    );
+  }
+  
+  // Detailed stats matching reference output (lines 222-228)
+  console.log(`📊 Stage 1 Results:
+  • Filtered (too short): ${stats.too_short}
+  • Filtered (obvious non-writing): ${stats.obvious_non_writing}
+  • Passed (writing keywords): ${stats.has_writing_keywords}
+  • Passed (looks like prose): ${stats.looks_like_prose}
+  • Total passed: ${filtered.length} (${passRate.toFixed(1)}%)
+  • Strategy: Permissive - let AI confirm in Stage 2`);
+  
+  return filtered;
+}
+
+/**
+ * Get new messages since a baseline timestamp
+ * Useful for re-evaluation after practice sessions
+ */
+export function getNewMessagesSince(
+  allMessages: ParsedMessage[],
+  baselineTimestamp: number,
+  onProgress?: (status: string) => void
+): ParsedMessage[] {
+  if (onProgress) {
+    onProgress('🔍 Finding messages newer than baseline...');
+  }
+  
+  const baselineDate = new Date(baselineTimestamp * 1000).toLocaleDateString();
+  console.log(`🔍 Finding messages after ${baselineDate}...`);
+  
+  const newMessages = allMessages.filter(msg => msg.timestamp > baselineTimestamp);
+  
+  if (onProgress) {
+    onProgress(`✓ Found ${newMessages.length} new messages since baseline`);
+  }
+  
+  console.log(`✓ Found ${newMessages.length} new messages`);
+  return newMessages;
+}
+
+/**
+ * Get conversation statistics for a range
+ * Useful for displaying info to user before processing
+ */
+export function getConversationRangeStats(
+  jsonData: any,
+  startConv: number,
+  endConv: number
+): {
+  conversationCount: number;
   estimatedMessages: number;
+  titles: string[];
   dateRange: { earliest: Date | null; latest: Date | null };
 } {
   const logs = Array.isArray(jsonData) ? jsonData : [];
+  const startIdx = startConv - 1;
+  const endIdx = Math.min(endConv, logs.length);
+  const selectedLogs = logs.slice(startIdx, endIdx);
   
   let earliestTime = Infinity;
   let latestTime = 0;
   let messageCount = 0;
+  const titles: string[] = [];
   
-  // Sample first 10 conversations to estimate
-  const sample = logs.slice(0, Math.min(10, logs.length));
-  
-  sample.forEach(conv => {
+  selectedLogs.forEach(conv => {
+    titles.push(conv.title || 'Untitled');
     const mapping = conv.mapping || {};
+    
     Object.values(mapping).forEach((node: any) => {
       const msg = node.message;
       if (msg?.author?.role === 'user' && msg?.create_time) {
@@ -115,65 +398,13 @@ export function getChatLogMetadata(jsonData: any): {
     });
   });
   
-  // Estimate total messages
-  const avgMessagesPerConv = messageCount / sample.length;
-  const estimatedTotal = Math.round(avgMessagesPerConv * logs.length);
-  
   return {
-    totalConversations: logs.length,
-    estimatedMessages: estimatedTotal,
+    conversationCount: selectedLogs.length,
+    estimatedMessages: messageCount,
+    titles: titles,
     dateRange: {
       earliest: earliestTime !== Infinity ? new Date(earliestTime * 1000) : null,
       latest: latestTime !== 0 ? new Date(latestTime * 1000) : null
     }
   };
-}
-
-/**
- * Filter messages using heuristics (Stage 1)
- */
-export function filterMessagesHeuristic(messages: ParsedMessage[]): ParsedMessage[] {
-  const writingKeywords = [
-    'grammar', 'punctuation', 'tone', 'writing', 'edit', 'proofread',
-    'essay', 'paper', 'report', 'email', 'letter', 'document',
-    'sentence', 'paragraph', 'draft', 'revision', 'feedback',
-    'formal', 'professional', 'academic', 'thesis', 'dissertation'
-  ];
-  
-  const excludeKeywords = [
-    'debug this code', 'solve for x', 'calculate the', 'syntax error',
-    'workout routine', 'recipe for', 'game walkthrough'
-  ];
-  
-  return messages.filter(msg => {
-    const text = msg.text.toLowerCase();
-    const wordCount = msg.text.split(/\s+/).length;
-    
-    // Too short
-    if (wordCount < 10) return false;
-    
-    // Has writing keywords - keep regardless
-    const hasWritingKw = writingKeywords.some(kw => text.includes(kw));
-    if (hasWritingKw) return true;
-    
-    // Has exclude keywords - filter out
-    if (excludeKeywords.some(kw => text.includes(kw))) return false;
-    
-    // Looks like prose
-    const hasPunctuation = msg.text.includes('.') && msg.text.length > 50;
-    const multipleSentences = (msg.text.match(/\./g) || []).length >= 2;
-    const longEnough = wordCount >= 20;
-    
-    return hasPunctuation && multipleSentences && longEnough;
-  });
-}
-
-/**
- * Get new messages since a baseline timestamp
- */
-export function getNewMessagesSince(
-  allMessages: ParsedMessage[],
-  baselineTimestamp: number
-): ParsedMessage[] {
-  return allMessages.filter(msg => msg.timestamp > baselineTimestamp);
 }
