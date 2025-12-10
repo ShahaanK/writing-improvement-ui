@@ -59,6 +59,7 @@ export interface Issue {
   recommendation: string;
 }
 
+// Extended Analysis with metadata for tracking evaluated conversations
 export interface Analysis {
   summary: {
     total_messages: number;
@@ -70,6 +71,16 @@ export interface Analysis {
   top_grammar_issues: Issue[];
   top_punctuation_issues: Issue[];
   top_tone_issues: Issue[];
+  // Metadata for tracking what was evaluated (for re-evaluation deduplication)
+  metadata?: {
+    evaluation_date: string;
+    conversations_range: {
+      start: number;  // 1-indexed
+      end: number;    // 1-indexed (inclusive)
+    };
+    total_conversations_evaluated: number;
+    messages_evaluated: number;
+  };
 }
 
 // ============================================================================
@@ -107,6 +118,49 @@ export interface PracticeSession {
   grading_results?: GradingResult[];
   score?: number;
   completed: boolean;
+}
+
+// Practice session summary for re-evaluation context
+export interface PracticePerformanceSummary {
+  total_sessions: number;
+  completed_sessions: number;
+  average_score: number;
+  total_questions: number;
+  correct_answers: number;
+  issue_performance: {
+    issue: string;
+    accuracy: number;
+    correct: number;
+    total: number;
+  }[];
+  strengths: string[];  // Issues with >80% accuracy
+  weaknesses: string[]; // Issues with <60% accuracy
+}
+
+// ============================================================================
+// Re-evaluation Types
+// ============================================================================
+
+export interface ReEvaluationRequest {
+  mode: 'incremental' | 'range';
+  startConversation?: number;
+  endConversation?: number;
+}
+
+export interface ReEvaluationResult {
+  followupAnalysis: Analysis;
+  practicePerformance: PracticePerformanceSummary;
+  comparison: {
+    grammar: { baseline: number; followup: number; change: number; changePercent: number };
+    punctuation: { baseline: number; followup: number; change: number; changePercent: number };
+    tone: { baseline: number; followup: number; change: number; changePercent: number };
+  };
+  issueComparison: {
+    resolved: Issue[];     // Issues in baseline but not in followup
+    persistent: Issue[];   // Issues in both
+    newIssues: Issue[];    // Issues only in followup
+  };
+  overallImprovement: string;  // AI-generated summary
 }
 
 // ============================================================================
@@ -153,6 +207,7 @@ export interface AppState {
   followupAnalysis?: Analysis;
   followupEvaluations?: EvaluationResult[];
   followupMetadata?: BaselineMetadata;
+  reEvaluationResult?: ReEvaluationResult;
   
   // Metadata
   created_at: string;

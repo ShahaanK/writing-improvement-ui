@@ -1,6 +1,5 @@
 // Parse OpenAI chat export format
 // Handles the complex nested mapping structure
-// Matches reference implementation: lines 50-328 in writing_evaluation.py
 
 export interface ParsedMessage {
   id: string;
@@ -30,7 +29,7 @@ export interface ChatLogMetadata {
 }
 
 /**
- * Get metadata about chat logs without parsing all messages
+ * Get metadata about chat logs - scans ALL conversations for accurate date range
  * Fast preview to help user select conversation range
  */
 export function getChatLogMetadata(jsonData: any): ChatLogMetadata {
@@ -41,36 +40,36 @@ export function getChatLogMetadata(jsonData: any): ChatLogMetadata {
   let messageCount = 0;
   const conversationTitles: string[] = [];
   
-  // Sample first 10 conversations to estimate total messages
-  const sampleSize = Math.min(10, logs.length);
-  const sample = logs.slice(0, sampleSize);
-  
   // Collect titles from all conversations
   logs.forEach(conv => {
     const title = conv.title || 'Untitled';
     conversationTitles.push(title);
   });
   
-  // Count messages in sample
-  sample.forEach(conv => {
+  // CRITICAL FIX: Scan ALL conversations to get REAL message count AND date range
+  console.log('📅 Scanning all conversations for accurate metadata...');
+  logs.forEach((conv, idx) => {
     const mapping = conv.mapping || {};
     Object.values(mapping).forEach((node: any) => {
       const msg = node.message;
       if (msg?.author?.role === 'user' && msg?.create_time) {
-        messageCount++;
+        messageCount++; // Count actual messages, not estimate
         earliestTime = Math.min(earliestTime, msg.create_time);
         latestTime = Math.max(latestTime, msg.create_time);
       }
     });
+    
+    // Progress indicator for large files
+    if ((idx + 1) % 100 === 0) {
+      console.log(`  Scanned ${idx + 1}/${logs.length} conversations...`);
+    }
   });
   
-  // Estimate total messages based on sample
-  const avgMessagesPerConv = messageCount / sampleSize;
-  const estimatedTotal = Math.round(avgMessagesPerConv * logs.length);
+  console.log(`✅ Metadata scan complete: ${messageCount} total messages, ${new Date(earliestTime * 1000).toLocaleDateString()} to ${new Date(latestTime * 1000).toLocaleDateString()}`);
   
   return {
     totalConversations: logs.length,
-    estimatedMessages: estimatedTotal,
+    estimatedMessages: messageCount, // Now actual count, not estimate
     dateRange: {
       earliest: earliestTime !== Infinity ? new Date(earliestTime * 1000) : null,
       latest: latestTime !== 0 ? new Date(latestTime * 1000) : null,
@@ -78,13 +77,12 @@ export function getChatLogMetadata(jsonData: any): ChatLogMetadata {
       latestTimestamp: latestTime !== 0 ? latestTime : 0
     },
     conversationTitles: conversationTitles,
-    sampleMessages: messageCount
+    sampleMessages: messageCount // Keep for backwards compatibility
   };
 }
 
 /**
  * Parse OpenAI chat logs and extract user messages
- * Matches reference implementation: lines 50-117 in writing_evaluation.py
  * Now supports conversation range selection
  */
 export function parseChatLogs(
@@ -136,7 +134,7 @@ export function parseChatLogs(
           return;
         }
         
-        // Extract text from parts array (matches reference lines 76-86)
+        // Extract text from parts array
         if (content.parts && Array.isArray(content.parts)) {
           const textParts: string[] = [];
           
@@ -170,13 +168,13 @@ export function parseChatLogs(
   
   if (onProgress) {
     onProgress(
-      `✓ Extracted ${messages.length} user messages from ${selectedLogs.length} conversations`,
+      `✔ Extracted ${messages.length} user messages from ${selectedLogs.length} conversations`,
       selectedLogs.length,
       selectedLogs.length
     );
   }
   
-  console.log(`✓ Extracted ${messages.length} user messages`);
+  console.log(`✔ Extracted ${messages.length} user messages`);
   return messages;
 }
 
@@ -184,9 +182,6 @@ export function parseChatLogs(
  * Filter messages using heuristics (Stage 1)
  * Identifies messages that appear to be writing-related
  * PERMISSIVE: Minimize false negatives - let LLM make final call
- * 
- * Matches reference implementation: lines 119-328 in writing_evaluation.py
- * Strategy: Pass anything that MIGHT be writing-related
  */
 export function filterMessagesHeuristic(
   messages: ParsedMessage[],
@@ -197,15 +192,14 @@ export function filterMessagesHeuristic(
   }
   
   console.log(`🔍 Stage 1 Filtering: ${messages.length} messages (PERMISSIVE STRATEGY)`);
-  console.log('Strategy: Pass anything that MIGHT be writing-related');
   
-  // Strong indicators of writing-related content (reference lines 129-153)
+  // Strong indicators of writing-related content (from Python reference)
   const writingKeywords = [
     // Core writing & editing
     'write', 'writing', 'edit', 'editing', 'proofread', 'revise',
     'revision', 'rewrite', 'rephrase', 'grammar', 'punctuation',
     'tone', 'sentence', 'paragraph', 'draft', 'feedback', 'format',
-
+    
     // Academic writing
     'essay', 'paper', 'report', 'document', 'analysis', 'argument',
     'summary', 'thesis', 'dissertation', 'abstract', 'introduction',
@@ -213,20 +207,20 @@ export function filterMessagesHeuristic(
     'chapter summary', 'quote integration', 'bibliography',
     'reference', 'citation', 'cite', 'peer review', 'manuscript',
     'publication', 'academic', 'formal', 'professional',
-
+    
     // Creative writing
     'story', 'scene', 'narrative', 'creative', 'prompt',
-
+    
     // Professional writing
     'email', 'letter', 'cover letter', 'linkedin', 'message',
     'statement', 'personal statement', 'supplementary essay',
     'application writing', 'proposal', 'presentation', 'speech',
-
+    
     // Common writing task phrases
     'expand', 'shorten', 'make it human', 'sound more human'
   ];
   
-  // Only filter EXTREMELY obvious non-writing content (reference lines 156-186)
+  // Only filter EXTREMELY obvious non-writing content
   const excludeKeywords = [
     // Coding & technical
     'debug this code', 'syntax error', 'compile error', 'stack trace',
@@ -234,25 +228,25 @@ export function filterMessagesHeuristic(
     'code', 'python', 'javascript', 'sql', 'html', 'css', 'racket',
     'algorithm', 'compute', 'compile', 'schema', 'erd', 'erd diagram',
     'normal form', '1nf', '2nf', '3nf', 'query',
-
+    
     // Math / calculation
     'solve for x', 'calculate the', 'find the derivative',
     'solve this equation', 'what is the integral',
     'limit', 'derivative', 'vector', 'matrix', 'complex number',
-
+    
     // Physics / science
     'velocity', 'acceleration', 'force', 'momentum', 'energy',
     'projectile', 'work', 'kinetic', 'potential',
     'molecule', 'reaction', 'glycolysis', 'atp',
-
+    
     // Fitness
     'workout routine', 'sets and reps', 'bench press program',
     'workout', 'squat', 'deadlift', 'reps', 'sets', 'cardio',
-
+    
     // Tests & quizzes
     'quiz', 'test', 'multiple choice', 'practice problems',
     'solve for', 'answer key',
-
+    
     // Entertainment
     'recipe for', 'how to cook', 'movie recommendation',
     'game walkthrough', 'song lyrics', 'game', 'movie', 'song', 'video'
@@ -278,13 +272,13 @@ export function filterMessagesHeuristic(
     const text = msg.text.toLowerCase();
     const wordCount = msg.text.split(/\s+/).length;
     
-    // Only filter extremely short messages (reference line 195)
+    // Only filter extremely short messages
     if (wordCount < 10) {
       stats.too_short++;
       return;
     }
     
-    // PRIORITY 1: If mentions writing explicitly, KEEP IT (reference lines 197-202)
+    // PRIORITY 1: If mentions writing explicitly, KEEP IT
     const hasWritingKeywords = writingKeywords.some(kw => text.includes(kw));
     if (hasWritingKeywords) {
       filtered.push(msg);
@@ -292,18 +286,18 @@ export function filterMessagesHeuristic(
       return; // Skip all other checks
     }
     
-    // PRIORITY 2: Check for OBVIOUS non-writing only (reference lines 204-208)
+    // PRIORITY 2: Check for OBVIOUS non-writing only
     const isObviouslyNotWriting = excludeKeywords.some(kw => text.includes(kw));
     if (isObviouslyNotWriting) {
       stats.obvious_non_writing++;
       return;
     }
     
-    // PRIORITY 3: Keep anything that looks like prose/formal text (reference lines 210-220)
+    // PRIORITY 3: Keep anything that looks like prose/formal text
     // Be very permissive - let Stage 2 (LLM) make final call
     const hasPunctuation = msg.text.includes('.');
     const multipleSentences = (msg.text.match(/\./g) || []).length >= 2;
-    const longEnough = wordCount >= 15; // Permissive threshold
+    const longEnough = wordCount >= 15; // Lowered from 20
     const hasQuestionMark = msg.text.includes('?');
     
     if ((hasPunctuation && longEnough) || multipleSentences || (hasQuestionMark && wordCount >= 15)) {
@@ -316,13 +310,12 @@ export function filterMessagesHeuristic(
   
   if (onProgress) {
     onProgress(
-      `✓ Stage 1: ${filtered.length}/${messages.length} passed (${passRate.toFixed(1)}% - permissive)`,
+      `✔ Stage 1: ${filtered.length}/${messages.length} passed (${passRate.toFixed(1)}% - permissive)`,
       messages.length,
       messages.length
     );
   }
   
-  // Detailed stats matching reference output (lines 222-228)
   console.log(`📊 Stage 1 Results:
   • Filtered (too short): ${stats.too_short}
   • Filtered (obvious non-writing): ${stats.obvious_non_writing}
@@ -353,10 +346,10 @@ export function getNewMessagesSince(
   const newMessages = allMessages.filter(msg => msg.timestamp > baselineTimestamp);
   
   if (onProgress) {
-    onProgress(`✓ Found ${newMessages.length} new messages since baseline`);
+    onProgress(`✔ Found ${newMessages.length} new messages since baseline`);
   }
   
-  console.log(`✓ Found ${newMessages.length} new messages`);
+  console.log(`✔ Found ${newMessages.length} new messages`);
   return newMessages;
 }
 

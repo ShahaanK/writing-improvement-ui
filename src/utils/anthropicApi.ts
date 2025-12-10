@@ -59,6 +59,16 @@ export interface Analysis {
   top_grammar_issues: Issue[];
   top_punctuation_issues: Issue[];
   top_tone_issues: Issue[];
+  // Metadata for tracking what was evaluated (for re-evaluation deduplication)
+  metadata?: {
+    evaluation_date: string;
+    conversations_range: {
+      start: number;  // 1-indexed
+      end: number;    // 1-indexed (inclusive)
+    };
+    total_conversations_evaluated: number;
+    messages_evaluated: number;
+  };
 }
 
 export class AnthropicAPI {
@@ -142,10 +152,10 @@ export class AnthropicAPI {
   async testConnection(): Promise<boolean> {
     try {
       const response = await this.callClaude('Respond with just "OK"', 10);
-      console.log('✅ API connection successful');
+      console.log('âœ… API connection successful');
       return true;
     } catch (error: any) {
-      console.error('❌ API connection failed:', error.message);
+      console.error('âŒ API connection failed:', error.message);
       return false;
     }
   }
@@ -230,7 +240,7 @@ export class AnthropicAPI {
       onProgress(`Stage 2: LLM confirmation (${totalBatches} batches)...`);
     }
     
-    console.log(`🤖 Stage 2: LLM Confirmation - ${messages.length} messages in ${totalBatches} batches`);
+    console.log(`ðŸ¤– Stage 2: LLM Confirmation - ${messages.length} messages in ${totalBatches} batches`);
     
     for (let i = 0; i < messages.length; i += batchSize) {
       const batch = messages.slice(i, i + batchSize);
@@ -289,7 +299,7 @@ NO markdown, NO explanations:
         
         // Ensure we have the right number of results
         if (!Array.isArray(results) || results.length !== batch.length) {
-          console.warn(`⚠️ Expected ${batch.length} results, got ${Array.isArray(results) ? results.length : 'non-array'}. Keeping all in batch.`);
+          console.warn(`âš ï¸ Expected ${batch.length} results, got ${Array.isArray(results) ? results.length : 'non-array'}. Keeping all in batch.`);
           relevant.push(...batch);
         } else {
           // Filter relevant messages
@@ -300,11 +310,11 @@ NO markdown, NO explanations:
           });
           
           const relevantCount = results.filter((r: boolean) => r === true).length;
-          console.log(`  ✅ Batch ${batchNum}: ${relevantCount}/${batch.length} confirmed relevant`);
+          console.log(`  âœ… Batch ${batchNum}: ${relevantCount}/${batch.length} confirmed relevant`);
         }
         
       } catch (error) {
-        console.error(`  ❌ Error processing batch ${batchNum}:`, error);
+        console.error(`  âŒ Error processing batch ${batchNum}:`, error);
         console.error(`  Error details:`, error instanceof Error ? error.message : String(error));
         console.log(`  Defaulting to keeping all messages in this batch`);
         relevant.push(...batch);
@@ -313,18 +323,18 @@ NO markdown, NO explanations:
       // Rate limit: Wait 60 seconds after every 4 batches (5 req/min limit)
       if (batchNum % 4 === 0 && batchNum < totalBatches) {
         if (onProgress) {
-          onProgress(`⏸️ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
+          onProgress(`â¸ï¸ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
         }
-        console.log(`  ⏸️ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
+        console.log(`  â¸ï¸ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
         await new Promise(resolve => setTimeout(resolve, 60000));
       }
     }
     
     const confirmationRate = (relevant.length / messages.length) * 100;
-    console.log(`\n✅ Stage 2 Complete!`);
-    console.log(`  • Confirmed relevant: ${relevant.length}`);
-    console.log(`  • Filtered out: ${messages.length - relevant.length}`);
-    console.log(`  • Confirmation rate: ${confirmationRate.toFixed(1)}%\n`);
+    console.log(`\nâœ… Stage 2 Complete!`);
+    console.log(`  â€¢ Confirmed relevant: ${relevant.length}`);
+    console.log(`  â€¢ Filtered out: ${messages.length - relevant.length}`);
+    console.log(`  â€¢ Confirmation rate: ${confirmationRate.toFixed(1)}%\n`);
     
     return relevant;
   }
@@ -342,7 +352,7 @@ NO markdown, NO explanations:
     const allResults: EvaluationResult[] = [];
     const totalBatches = Math.ceil(messages.length / batchSize);
     
-    console.log(`\n📊 Stage 3: Detailed Evaluation - ${messages.length} messages in ${totalBatches} batches`);
+    console.log(`\nðŸ“Š Stage 3: Detailed Evaluation - ${messages.length} messages in ${totalBatches} batches`);
     
     for (let i = 0; i < messages.length; i += batchSize) {
       const batch = messages.slice(i, i + batchSize);
@@ -390,11 +400,11 @@ NO markdown, NO explanations, ONLY the JSON array:
         response = await this.callClaude(prompt, 4000, onProgress);
         cleanedResponse = this.cleanJSONResponse(response);
         
-        console.log(`\n🔥 Batch ${batchNum} Raw Response (first 600 chars):`);
+        console.log(`\nðŸ”¥ Batch ${batchNum} Raw Response (first 600 chars):`);
         console.log(response.substring(0, 600));
-        console.log(`\n🧹 Batch ${batchNum} Cleaned Response (first 600 chars):`);
+        console.log(`\nðŸ§¹ Batch ${batchNum} Cleaned Response (first 600 chars):`);
         console.log(cleanedResponse.substring(0, 600));
-        console.log(`\n🔍 Attempting to parse...`);
+        console.log(`\nðŸ” Attempting to parse...`);
         
         const batchResults = JSON.parse(cleanedResponse);
         
@@ -434,13 +444,13 @@ NO markdown, NO explanations, ONLY the JSON array:
           }
         }
         
-        console.log(`  ✅ Batch ${batchNum}: Successfully parsed ${batchResults.length} results`);
+        console.log(`  âœ… Batch ${batchNum}: Successfully parsed ${batchResults.length} results`);
         console.log(`     Mapped to ${batch.length} messages with IDs`);
         
       } catch (error) {
-        console.error(`  ❌ Error parsing batch ${batchNum} results:`, error);
-        console.error('📄 Full raw response:', response);
-        console.error('🧹 Full cleaned response:', cleanedResponse);
+        console.error(`  âŒ Error parsing batch ${batchNum} results:`, error);
+        console.error('ðŸ“„ Full raw response:', response);
+        console.error('ðŸ§¹ Full cleaned response:', cleanedResponse);
         
         // Add placeholder results for failed batch with proper message mapping
         for (let j = 0; j < batch.length; j++) {
@@ -461,21 +471,21 @@ NO markdown, NO explanations, ONLY the JSON array:
       // Rate limit: Wait 60 seconds after every 4 batches (5 req/min limit)
       if (batchNum % 4 === 0 && batchNum < totalBatches) {
         if (onProgress) {
-          onProgress(`⏸️ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
+          onProgress(`â¸ï¸ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
         }
-        console.log(`  ⏸️ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
+        console.log(`  â¸ï¸ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
         await new Promise(resolve => setTimeout(resolve, 60000));
       }
     }
     
-    console.log(`\n✅ Stage 3 Complete!`);
-    console.log(`  • Total evaluations: ${allResults.length}`);
-    console.log(`  • All messages have message_id and text preserved`);
+    console.log(`\nâœ… Stage 3 Complete!`);
+    console.log(`  â€¢ Total evaluations: ${allResults.length}`);
+    console.log(`  â€¢ All messages have message_id and text preserved`);
     
     // Validate that all results have required fields
     const invalidResults = allResults.filter(r => !r.message_id || !r.text);
     if (invalidResults.length > 0) {
-      console.warn(`⚠️ WARNING: ${invalidResults.length} results missing message_id or text`);
+      console.warn(`âš ï¸ WARNING: ${invalidResults.length} results missing message_id or text`);
     }
     
     return allResults;
@@ -561,15 +571,15 @@ Respond with ONLY valid JSON (no markdown, no preamble, no explanation):
       
       // CRITICAL: Validate that we got at least 1 issue per category (matches reference lines 547-567)
       if (!analysis.top_grammar_issues || analysis.top_grammar_issues.length < 1) {
-        console.warn('⚠️ No grammar issues returned by API, generating fallback');
+        console.warn('âš ï¸ No grammar issues returned by API, generating fallback');
         analysis.top_grammar_issues = this.generateFallbackIssues(allGrammarIssues, 'grammar').slice(0, 5);
       }
       if (!analysis.top_punctuation_issues || analysis.top_punctuation_issues.length < 1) {
-        console.warn('⚠️ No punctuation issues returned by API, generating fallback');
+        console.warn('âš ï¸ No punctuation issues returned by API, generating fallback');
         analysis.top_punctuation_issues = this.generateFallbackIssues(allPunctuationIssues, 'punctuation').slice(0, 5);
       }
       if (!analysis.top_tone_issues || analysis.top_tone_issues.length < 1) {
-        console.warn('⚠️ No tone issues returned by API, generating fallback');
+        console.warn('âš ï¸ No tone issues returned by API, generating fallback');
         analysis.top_tone_issues = this.generateFallbackIssues(allToneIssues, 'tone').slice(0, 5);
       }
       
@@ -578,14 +588,14 @@ Respond with ONLY valid JSON (no markdown, no preamble, no explanation):
       analysis.top_punctuation_issues = analysis.top_punctuation_issues.slice(0, 5);
       analysis.top_tone_issues = analysis.top_tone_issues.slice(0, 5);
       
-      console.log(`✅ Analysis complete:
-  • Grammar issues: ${analysis.top_grammar_issues.length}
-  • Punctuation issues: ${analysis.top_punctuation_issues.length}
-  • Tone issues: ${analysis.top_tone_issues.length}`);
+      console.log(`âœ… Analysis complete:
+  â€¢ Grammar issues: ${analysis.top_grammar_issues.length}
+  â€¢ Punctuation issues: ${analysis.top_punctuation_issues.length}
+  â€¢ Tone issues: ${analysis.top_tone_issues.length}`);
       
       return analysis;
     } catch (error) {
-      console.error('❌ Error analyzing patterns:', error);
+      console.error('âŒ Error analyzing patterns:', error);
       // Return fallback analysis with at least 1 issue per category (max 5)
       return {
         summary: {
@@ -720,7 +730,7 @@ Respond with ONLY valid JSON array (no markdown):
           question: idx + 1,
           issue: q.specific_issue,
           correct: isCorrect,
-          feedback: isCorrect ? 'Correct! ✓' : `Incorrect. The correct answer is ${correctLetter}.`,
+          feedback: isCorrect ? 'Correct! âœ“' : `Incorrect. The correct answer is ${correctLetter}.`,
           correct_answer: q.correct_answer,
           explanation: q.explanation,
           grading_method: 'programmatic'
@@ -740,7 +750,7 @@ Respond with ONLY valid JSON array (no markdown):
             question: idx + 1,
             issue: q.specific_issue,
             correct: true,
-            feedback: 'Correct! ✓',
+            feedback: 'Correct! âœ“',
             correct_answer: q.correct_answer,
             explanation: q.explanation,
             grading_method: 'similarity'
@@ -751,7 +761,7 @@ Respond with ONLY valid JSON array (no markdown):
             question: idx + 1,
             issue: q.specific_issue,
             correct: true,
-            feedback: 'Correct! Minor wording differences are acceptable. ✓',
+            feedback: 'Correct! Minor wording differences are acceptable. âœ“',
             correct_answer: q.correct_answer,
             explanation: q.explanation,
             grading_method: 'similarity'
@@ -882,10 +892,10 @@ Respond with ONLY valid JSON array of ${needsLLM.length} results in SAME ORDER (
     
     // Log for debugging
     if (!cleaned.startsWith('[') && !cleaned.startsWith('{')) {
-      console.warn('⚠️ Cleaned JSON does not start with [ or {:', cleaned.substring(0, 50));
+      console.warn('âš ï¸ Cleaned JSON does not start with [ or {:', cleaned.substring(0, 50));
     }
     if (!cleaned.endsWith(']') && !cleaned.endsWith('}')) {
-      console.warn('⚠️ Cleaned JSON does not end with ] or }:', cleaned.substring(cleaned.length - 50));
+      console.warn('âš ï¸ Cleaned JSON does not end with ] or }:', cleaned.substring(cleaned.length - 50));
     }
     
     return cleaned;
@@ -954,6 +964,160 @@ Respond with ONLY valid JSON array of ${needsLLM.length} results in SAME ORDER (
       severity: frequency > 5 ? 'high' : frequency > 2 ? 'medium' : 'low',
       recommendation: `Review and practice ${category} rules related to: ${issue}`
     }));
+  }
+
+  /**
+   * Generate comparison analysis between baseline and followup evaluations
+   * Includes practice performance context for holistic assessment
+   */
+  async generateComparisonAnalysis(
+    baselineAnalysis: Analysis,
+    followupAnalysis: Analysis,
+    practicePerformance: {
+      completed_sessions: number;
+      total_sessions: number;
+      average_score: number;
+      strengths: string[];
+      weaknesses: string[];
+    },
+    onProgress?: (status: string) => void
+  ): Promise<{
+    comparison: {
+      grammar: { baseline: number; followup: number; change: number; changePercent: number };
+      punctuation: { baseline: number; followup: number; change: number; changePercent: number };
+      tone: { baseline: number; followup: number; change: number; changePercent: number };
+    };
+    issueComparison: {
+      resolved: Issue[];
+      persistent: Issue[];
+      newIssues: Issue[];
+    };
+    overallImprovement: string;
+  }> {
+    if (onProgress) {
+      onProgress('Generating comparison analysis...');
+    }
+
+    // Calculate score changes
+    const comparison = {
+      grammar: {
+        baseline: baselineAnalysis.summary.avg_grammar_score,
+        followup: followupAnalysis.summary.avg_grammar_score,
+        change: followupAnalysis.summary.avg_grammar_score - baselineAnalysis.summary.avg_grammar_score,
+        changePercent: ((followupAnalysis.summary.avg_grammar_score - baselineAnalysis.summary.avg_grammar_score) / baselineAnalysis.summary.avg_grammar_score) * 100
+      },
+      punctuation: {
+        baseline: baselineAnalysis.summary.avg_punctuation_score,
+        followup: followupAnalysis.summary.avg_punctuation_score,
+        change: followupAnalysis.summary.avg_punctuation_score - baselineAnalysis.summary.avg_punctuation_score,
+        changePercent: ((followupAnalysis.summary.avg_punctuation_score - baselineAnalysis.summary.avg_punctuation_score) / baselineAnalysis.summary.avg_punctuation_score) * 100
+      },
+      tone: {
+        baseline: baselineAnalysis.summary.avg_tone_score,
+        followup: followupAnalysis.summary.avg_tone_score,
+        change: followupAnalysis.summary.avg_tone_score - baselineAnalysis.summary.avg_tone_score,
+        changePercent: ((followupAnalysis.summary.avg_tone_score - baselineAnalysis.summary.avg_tone_score) / baselineAnalysis.summary.avg_tone_score) * 100
+      }
+    };
+
+    // Compare issues - find resolved, persistent, and new
+    const baselineIssueNames = new Set([
+      ...baselineAnalysis.top_grammar_issues.map(i => i.issue.toLowerCase()),
+      ...baselineAnalysis.top_punctuation_issues.map(i => i.issue.toLowerCase()),
+      ...baselineAnalysis.top_tone_issues.map(i => i.issue.toLowerCase())
+    ]);
+
+    const followupIssueNames = new Set([
+      ...followupAnalysis.top_grammar_issues.map(i => i.issue.toLowerCase()),
+      ...followupAnalysis.top_punctuation_issues.map(i => i.issue.toLowerCase()),
+      ...followupAnalysis.top_tone_issues.map(i => i.issue.toLowerCase())
+    ]);
+
+    const allBaselineIssues = [
+      ...baselineAnalysis.top_grammar_issues,
+      ...baselineAnalysis.top_punctuation_issues,
+      ...baselineAnalysis.top_tone_issues
+    ];
+
+    const allFollowupIssues = [
+      ...followupAnalysis.top_grammar_issues,
+      ...followupAnalysis.top_punctuation_issues,
+      ...followupAnalysis.top_tone_issues
+    ];
+
+    // Issues in baseline but not in followup = resolved
+    const resolved = allBaselineIssues.filter(
+      issue => !followupIssueNames.has(issue.issue.toLowerCase())
+    );
+
+    // Issues in both = persistent
+    const persistent = allFollowupIssues.filter(
+      issue => baselineIssueNames.has(issue.issue.toLowerCase())
+    );
+
+    // Issues in followup but not in baseline = new
+    const newIssues = allFollowupIssues.filter(
+      issue => !baselineIssueNames.has(issue.issue.toLowerCase())
+    );
+
+    // Generate AI summary of improvement
+    const prompt = `Analyze this writing improvement data and provide a brief, encouraging assessment (2-3 sentences).
+
+BASELINE SCORES:
+- Grammar: ${baselineAnalysis.summary.avg_grammar_score.toFixed(2)}/5
+- Punctuation: ${baselineAnalysis.summary.avg_punctuation_score.toFixed(2)}/5
+- Tone: ${baselineAnalysis.summary.avg_tone_score.toFixed(2)}/5
+
+FOLLOWUP SCORES:
+- Grammar: ${followupAnalysis.summary.avg_grammar_score.toFixed(2)}/5 (${comparison.grammar.change >= 0 ? '+' : ''}${comparison.grammar.changePercent.toFixed(1)}%)
+- Punctuation: ${followupAnalysis.summary.avg_punctuation_score.toFixed(2)}/5 (${comparison.punctuation.change >= 0 ? '+' : ''}${comparison.punctuation.changePercent.toFixed(1)}%)
+- Tone: ${followupAnalysis.summary.avg_tone_score.toFixed(2)}/5 (${comparison.tone.change >= 0 ? '+' : ''}${comparison.tone.changePercent.toFixed(1)}%)
+
+PRACTICE PERFORMANCE:
+- Sessions completed: ${practicePerformance.completed_sessions}/${practicePerformance.total_sessions}
+- Average practice score: ${Math.round(practicePerformance.average_score * 100)}%
+- Mastered areas: ${practicePerformance.strengths.join(', ') || 'None yet'}
+- Areas still challenging: ${practicePerformance.weaknesses.join(', ') || 'None'}
+
+ISSUE CHANGES:
+- Resolved issues: ${resolved.length} (${resolved.slice(0, 3).map(i => i.issue).join(', ')})
+- Persistent issues: ${persistent.length}
+- New issues: ${newIssues.length}
+
+Provide a personalized, encouraging assessment that:
+1. Highlights specific improvements made
+2. Connects practice performance to real writing improvement
+3. Suggests next focus area if needed
+
+Respond with ONLY the assessment text (no JSON, no markdown):`;
+
+    let overallImprovement = '';
+    
+    try {
+      overallImprovement = await this.callClaude(prompt, 500, onProgress);
+      overallImprovement = overallImprovement.trim();
+    } catch (error) {
+      console.error('Error generating improvement summary:', error);
+      // Generate fallback summary
+      const avgChange = (comparison.grammar.changePercent + comparison.punctuation.changePercent + comparison.tone.changePercent) / 3;
+      if (avgChange > 5) {
+        overallImprovement = `Great progress! Your writing scores improved by an average of ${avgChange.toFixed(1)}%. ${resolved.length > 0 ? `You've successfully resolved ${resolved.length} issue(s) from your baseline.` : ''} Keep up the excellent work!`;
+      } else if (avgChange > 0) {
+        overallImprovement = `You're making steady progress. Your scores show modest improvement, and your practice is paying off. Focus on the persistent issues to see more gains.`;
+      } else {
+        overallImprovement = `Your scores are stable. Continue practicing the identified issues, and consider reviewing the areas where you scored lower in practice sessions.`;
+      }
+    }
+
+    return {
+      comparison,
+      issueComparison: {
+        resolved,
+        persistent,
+        newIssues
+      },
+      overallImprovement
+    };
   }
   
   /**

@@ -2,8 +2,10 @@ import React, { useState } from 'react';
 import { FileText, Download, Upload, AlertCircle, CheckCircle, Loader, XCircle, Info, ChevronRight } from 'lucide-react';
 import { AnthropicAPI, PracticeQuestion, GradingResult, Issue, Analysis, Message } from './utils/anthropicApi';
 import { parseChatLogs, filterMessagesHeuristic, ParsedMessage, getChatLogMetadata, ChatLogMetadata, getConversationRangeStats } from './utils/chatLogParser';
-import { PracticeSession, ViewType } from './types';
+import { PracticeSession, ViewType, ReEvaluationResult, PracticePerformanceSummary } from './types';
 import PracticeSessionComponent from './components/PracticeSession';
+import ReEvaluationComponent from './components/ReEvaluation';
+import ProgressDashboard from './components/ProgressDashboard';
 
 // Progress Stepper Component
 const ProgressStepper: React.FC<{
@@ -81,12 +83,16 @@ function App() {
   const [progress, setProgress] = useState({ current: 0, total: 100, stage: '' });
   const [error, setError] = useState('');
   
-  // NEW: File metadata and range selection
+  // File metadata and range selection
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [fileMetadata, setFileMetadata] = useState<ChatLogMetadata | null>(null);
   const [conversationRange, setConversationRange] = useState({ start: 1, end: 100 });
   const [showRangeSelector, setShowRangeSelector] = useState(false);
   const [processingSteps, setProcessingSteps] = useState<string[]>([]);
+  
+  // Re-evaluation state
+  const [followupAnalysis, setFollowupAnalysis] = useState<Analysis | null>(null);
+  const [reEvaluationResult, setReEvaluationResult] = useState<ReEvaluationResult | null>(null);
 
   // Helper function to mark a step as completed
   const markStepCompleted = (step: ViewType) => {
@@ -112,7 +118,7 @@ function App() {
     setCurrentView(view);
   };
 
-  // ADDED: Missing helper functions
+  // Session handlers
   const updateSession = (sessionId: string, answers: { [key: string]: string }) => {
     setPracticeSessions(prev => 
       prev.map(session => 
@@ -166,7 +172,7 @@ function App() {
     }
   };
 
-  // NEW: Handle file upload and show metadata
+  // Handle file upload and show metadata
   const handleFileUpload = async (file: File) => {
     try {
       setProcessingSteps(['📂 Reading file...']);
@@ -263,11 +269,9 @@ function App() {
         (status) => {
           setProgress(prev => ({ ...prev, stage: status }));
           setProcessingSteps(prev => {
-            // If it's a rate limit message, add it as a new step
             if (status.includes('⏸️')) {
               return [...prev, `  ${status}`];
             }
-            // Otherwise update the last step
             return [...prev.slice(0, -1), `  ${status}`];
           });
         }
@@ -302,6 +306,20 @@ function App() {
         setProcessingSteps(prev => [...prev.slice(0, -1), `  ${status}`]);
       });
       
+      // Add metadata to the analysis
+      const analysisWithMetadata: Analysis = {
+        ...analysis,
+        metadata: {
+          evaluation_date: new Date().toISOString(),
+          conversations_range: {
+            start: conversationRange.start,
+            end: conversationRange.end
+          },
+          total_conversations_evaluated: conversationRange.end - conversationRange.start + 1,
+          messages_evaluated: evaluations.length
+        }
+      };
+      
       setProcessingSteps(prev => [
         ...prev,
         `✓ Identified top issues in grammar, punctuation, and tone`,
@@ -309,7 +327,7 @@ function App() {
       ]);
       
       setProgress({ current: 100, total: 100, stage: 'Complete!' });
-      setBaselineAnalysis(analysis);
+      setBaselineAnalysis(analysisWithMetadata);
       
       // Mark evaluation as completed
       markStepCompleted('setup');
@@ -397,6 +415,180 @@ function App() {
         setProcessing(false);
         setCurrentView('practice');
       }, 1500);
+      
+    } catch (err: any) {
+      setError(err.message);
+      setProcessing(false);
+      setProcessingSteps(prev => [...prev, `❌ Error: ${err.message}`]);
+    }
+  };
+
+  // Re-evaluation handler
+  const handleReEvaluation = async (
+    file: File,
+    options: {
+      start: number;
+      end: number;
+      mode: 'incremental' | 'range';
+      practicePerformance: PracticePerformanceSummary;
+    }
+  ) => {
+    if (!api || !baselineAnalysis) {
+      setError('Missing API or baseline analysis');
+      return;
+    }
+
+    try {
+      setProcessing(true);
+      setError('');
+      setProcessingSteps([]);
+      
+      const text = await file.text();
+      const data = JSON.parse(text);
+      
+      // Step 1: Parse only the new conversations
+      setProgress({ current: 10, total: 100, stage: 'Parsing new conversations...' });
+      setProcessingSteps([`🔄 Re-evaluation: Analyzing conversations ${options.start}-${options.end}...`]);
+      
+      const parsedMessages: ParsedMessage[] = parseChatLogs(
+        data,
+        {
+          startConversation: options.start,
+          endConversation: options.end
+        },
+        (status) => {
+          setProcessingSteps(prev => [...prev.slice(0, -1), `  ${status}`]);
+        }
+      );
+      
+      setProcessingSteps(prev => [...prev, `✓ Parsed ${parsedMessages.length} messages from new conversations`]);
+      
+      // Step 2: Filter for writing-related content
+      setProgress({ current: 20, total: 100, stage: 'Filtering for writing content...' });
+      setProcessingSteps(prev => [...prev, '🔍 Filtering for writing-related messages...']);
+      
+      const filtered = filterMessagesHeuristic(
+        parsedMessages,
+        (status) => {
+          setProcessingSteps(prev => [...prev.slice(0, -1), `  ${status}`]);
+        }
+      );
+      
+      const limitedFiltered = filtered.slice(0, 20);
+      
+      if (limitedFiltered.length === 0) {
+        throw new Error('No writing-related messages found in selected conversations');
+      }
+      
+      setProcessingSteps(prev => [
+        ...prev,
+        `✓ Found ${filtered.length} writing messages`,
+        `📊 Processing ${limitedFiltered.length} messages for evaluation`
+      ]);
+      
+      // Step 3: LLM Confirmation
+      setProgress({ current: 30, total: 100, stage: 'LLM confirmation...' });
+      setProcessingSteps(prev => [...prev, '🤖 LLM confirmation filtering...']);
+      
+      const confirmed = await api.filterRelevantMessagesLLM(
+        limitedFiltered.map(msg => ({ id: msg.id, text: msg.text })),
+        10,
+        (status) => {
+          setProgress(prev => ({ ...prev, stage: status }));
+          if (status.includes('⏸️')) {
+            setProcessingSteps(prev => [...prev, `  ${status}`]);
+          }
+        }
+      );
+      
+      if (confirmed.length === 0) {
+        throw new Error('No messages confirmed as writing-related');
+      }
+      
+      setProcessingSteps(prev => [
+        ...prev,
+        `✓ Confirmed ${confirmed.length} messages for evaluation`
+      ]);
+      
+      // Step 4: AI Evaluation
+      setProgress({ current: 50, total: 100, stage: 'Evaluating writing quality...' });
+      setProcessingSteps(prev => [...prev, '📝 Evaluating writing quality...']);
+      
+      const evaluations = await api.evaluateBatch(confirmed, (status) => {
+        setProgress(prev => ({ ...prev, stage: status }));
+      });
+      
+      setProcessingSteps(prev => [...prev, `✓ Evaluated ${evaluations.length} messages`]);
+      
+      // Step 5: Pattern Analysis
+      setProgress({ current: 70, total: 100, stage: 'Analyzing patterns...' });
+      setProcessingSteps(prev => [...prev, '📈 Analyzing patterns...']);
+      
+      const followup = await api.analyzePatterns(evaluations, (status) => {
+        setProcessingSteps(prev => [...prev.slice(0, -1), `  ${status}`]);
+      });
+      
+      // Add metadata to followup analysis
+      const followupWithMetadata: Analysis = {
+        ...followup,
+        metadata: {
+          evaluation_date: new Date().toISOString(),
+          conversations_range: {
+            start: options.start,
+            end: options.end
+          },
+          total_conversations_evaluated: options.end - options.start + 1,
+          messages_evaluated: evaluations.length
+        }
+      };
+      
+      setFollowupAnalysis(followupWithMetadata);
+      
+      // Step 6: Generate comparison analysis
+      setProgress({ current: 85, total: 100, stage: 'Generating comparison analysis...' });
+      setProcessingSteps(prev => [...prev, '📊 Generating comparison with baseline...']);
+      
+      const comparisonResult = await api.generateComparisonAnalysis(
+        baselineAnalysis,
+        followupWithMetadata,
+        {
+          completed_sessions: options.practicePerformance.completed_sessions,
+          total_sessions: options.practicePerformance.total_sessions,
+          average_score: options.practicePerformance.average_score,
+          strengths: options.practicePerformance.strengths,
+          weaknesses: options.practicePerformance.weaknesses
+        },
+        (status) => {
+          setProcessingSteps(prev => [...prev.slice(0, -1), `  ${status}`]);
+        }
+      );
+      
+      // Create full re-evaluation result
+      const fullResult: ReEvaluationResult = {
+        followupAnalysis: followupWithMetadata,
+        practicePerformance: options.practicePerformance,
+        ...comparisonResult
+      };
+      
+      setReEvaluationResult(fullResult);
+      
+      setProcessingSteps(prev => [
+        ...prev,
+        '✓ Comparison analysis complete',
+        `📊 Grammar change: ${comparisonResult.comparison.grammar.changePercent >= 0 ? '+' : ''}${comparisonResult.comparison.grammar.changePercent.toFixed(1)}%`,
+        `📊 Punctuation change: ${comparisonResult.comparison.punctuation.changePercent >= 0 ? '+' : ''}${comparisonResult.comparison.punctuation.changePercent.toFixed(1)}%`,
+        `📊 Tone change: ${comparisonResult.comparison.tone.changePercent >= 0 ? '+' : ''}${comparisonResult.comparison.tone.changePercent.toFixed(1)}%`,
+        `✓ Resolved ${comparisonResult.issueComparison.resolved.length} issues`,
+        '🎉 Re-evaluation complete!'
+      ]);
+      
+      setProgress({ current: 100, total: 100, stage: 'Complete!' });
+      markStepCompleted('reevaluation');
+      
+      setTimeout(() => {
+        setProcessing(false);
+        setCurrentView('dashboard');
+      }, 2000);
       
     } catch (err: any) {
       setError(err.message);
@@ -615,7 +807,7 @@ function App() {
                         className={`${
                           step.startsWith('✓') ? 'text-green-600' :
                           step.startsWith('❌') ? 'text-red-600' :
-                          step.startsWith('🤖') || step.startsWith('📈') || step.startsWith('🔍') || step.startsWith('📖') ? 'text-blue-700 font-semibold' :
+                          step.startsWith('🤖') || step.startsWith('📈') || step.startsWith('📝') || step.startsWith('📖') ? 'text-blue-700 font-semibold' :
                           step.startsWith('  ') ? 'text-gray-600 pl-4' :
                           'text-gray-700'
                         }`}
@@ -642,7 +834,7 @@ function App() {
           <div className="bg-white rounded-xl shadow-lg p-8">
             <h2 className="text-2xl font-bold mb-6">📊 Writing Evaluation Report</h2>
 
-            {/* FIXED: Overall Summary Box at the TOP */}
+            {/* Overall Summary Box */}
             <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-lg p-6 mb-8">
               <h3 className="text-xl font-bold text-blue-900 mb-4">Summary</h3>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
@@ -781,7 +973,6 @@ function App() {
                   <div className="bg-blue-600 h-3 rounded-full transition-all" style={{ width: `${progress.current}%` }} />
                 </div>
                 
-                {/* Processing Steps Log */}
                 <div className="bg-white rounded-lg p-4 max-h-64 overflow-y-auto border border-blue-200">
                   <h4 className="font-semibold text-gray-800 mb-2 flex items-center">
                     <Loader className="animate-spin mr-2" size={16} />
@@ -824,133 +1015,38 @@ function App() {
         )}
 
         {/* Dashboard View */}
-        {currentView === 'dashboard' && (
-          <div className="bg-white rounded-xl shadow-lg p-8">
-            <h2 className="text-2xl font-bold mb-6">📊 Progress Dashboard</h2>
-            
-            {/* Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-              <div className="bg-blue-50 rounded-lg p-6 border-2 border-blue-200">
-                <p className="text-sm text-blue-600 font-medium mb-2">Sessions Completed</p>
-                <p className="text-4xl font-bold text-blue-900">
-                  {practiceSessions.filter(s => s.completed).length}
-                  <span className="text-xl text-gray-500">/{practiceSessions.length}</span>
-                </p>
-                <div className="mt-3 w-full bg-blue-200 rounded-full h-2">
-                  <div 
-                    className="bg-blue-600 h-2 rounded-full transition-all" 
-                    style={{ width: `${(practiceSessions.filter(s => s.completed).length / practiceSessions.length) * 100}%` }}
-                  />
-                </div>
-              </div>
-
-              <div className="bg-green-50 rounded-lg p-6 border-2 border-green-200">
-                <p className="text-sm text-green-600 font-medium mb-2">Average Score</p>
-                <p className="text-4xl font-bold text-green-900">
-                  {practiceSessions.filter(s => s.completed).length > 0
-                    ? Math.round((practiceSessions.filter(s => s.completed).reduce((sum, s) => sum + (s.score || 0), 0) / practiceSessions.filter(s => s.completed).length) * 100)
-                    : 0}%
-                </p>
-                <p className="text-xs text-green-700 mt-2">
-                  Across {practiceSessions.filter(s => s.completed).length} completed session(s)
-                </p>
-              </div>
-
-              <div className="bg-purple-50 rounded-lg p-6 border-2 border-purple-200">
-                <p className="text-sm text-purple-600 font-medium mb-2">Total Questions</p>
-                <p className="text-4xl font-bold text-purple-900">
-                  {practiceSessions.reduce((sum, s) => sum + s.questions.length, 0)}
-                </p>
-                <p className="text-xs text-purple-700 mt-2">
-                  {practiceSessions.filter(s => s.completed).reduce((sum, s) => sum + (s.grading_results?.filter(r => r.correct).length || 0), 0)} answered correctly
-                </p>
-              </div>
-            </div>
-
-            {/* Session Progress List */}
-            <div className="mb-8">
-              <h3 className="text-lg font-bold text-gray-800 mb-4">Session Progress</h3>
-              <div className="space-y-3">
-                {practiceSessions.map((session, idx) => (
-                  <div key={session.session_id} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg border border-gray-200">
-                    <div className="flex items-center space-x-3">
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${
-                        session.completed ? 'bg-green-100 text-green-600' : 'bg-gray-200 text-gray-500'
-                      }`}>
-                        {session.completed ? '✓' : idx + 1}
-                      </div>
-                      <div>
-                        <p className="font-semibold text-gray-800">Session {session.session_number}: {session.focus}</p>
-                        <p className="text-xs text-gray-600">{session.date}</p>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      {session.completed && session.score !== undefined ? (
-                        <>
-                          <p className="text-2xl font-bold text-gray-900">
-                            {Math.round(session.score * 100)}%
-                          </p>
-                          <p className="text-xs text-gray-600">
-                            {session.grading_results?.filter(r => r.correct).length} / {session.questions.length}
-                          </p>
-                        </>
-                      ) : (
-                        <p className="text-sm text-gray-500">Not completed</p>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Action Buttons */}
-            <div className="flex gap-4">
-              <button
-                onClick={() => setCurrentView('practice')}
-                className="flex-1 px-6 py-4 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg transition-colors"
-              >
-                Back to Practice Sessions
-              </button>
-              
-              <button
-                onClick={() => {
-                  markStepCompleted('reevaluation');
-                  setCurrentView('reevaluation');
-                }}
-                className="flex-1 px-6 py-4 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg transition-colors"
-              >
-                Start Re-evaluation →
-              </button>
-            </div>
-          </div>
+        {currentView === 'dashboard' && baselineAnalysis && (
+          <ProgressDashboard
+            sessions={practiceSessions}
+            baselineAnalysis={baselineAnalysis}
+            followupAnalysis={followupAnalysis || undefined}
+            reEvaluationResult={reEvaluationResult || undefined}
+            onStartReEvaluation={() => {
+              setCurrentView('reevaluation');
+            }}
+            onBackToPractice={() => {
+              setCurrentView('practice');
+            }}
+          />
         )}
 
         {/* Re-evaluation View */}
-        {currentView === 'reevaluation' && (
-          <div className="bg-white rounded-xl shadow-lg p-8">
-            <h2 className="text-2xl font-bold mb-6">🔄 Re-evaluation</h2>
-            <div className="bg-blue-50 border-2 border-blue-200 rounded-lg p-6 mb-6">
-              <p className="text-blue-900 mb-4">
-                Re-evaluation allows you to measure your writing improvement by analyzing new chat conversations since your baseline evaluation.
-              </p>
-              <p className="text-sm text-blue-700">
-                <strong>Note:</strong> This feature requires uploading an updated chat export file. The system will analyze only new conversations to measure improvement.
-              </p>
-            </div>
-            
-            <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-6 mb-6">
-              <h3 className="font-semibold text-yellow-900 mb-2">🚧 Coming Soon</h3>
-              <p className="text-sm text-yellow-800">
-                Re-evaluation functionality is currently under development. For now, you can review your practice session progress in the Dashboard.
-              </p>
-            </div>
+        {currentView === 'reevaluation' && baselineAnalysis && api && (
+          <ReEvaluationComponent
+            baselineAnalysis={baselineAnalysis}
+            practiceSessions={practiceSessions}
+            onRunReEvaluation={handleReEvaluation}
+            processing={processing}
+            progress={progress}
+            processingSteps={processingSteps}
+          />
+        )}
 
-            <button
-              onClick={() => setCurrentView('dashboard')}
-              className="w-full px-6 py-4 bg-gray-100 hover:bg-gray-200 text-gray-800 font-semibold rounded-lg transition-colors"
-            >
-              ← Back to Dashboard
-            </button>
+        {/* Error display for any view */}
+        {error && currentView !== 'setup' && (
+          <div className="mt-4 bg-red-50 border border-red-200 rounded-lg p-4 flex items-start">
+            <AlertCircle className="text-red-600 mr-3" size={20} />
+            <p className="text-red-800">{error}</p>
           </div>
         )}
       </div>
