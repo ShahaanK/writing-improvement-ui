@@ -145,12 +145,6 @@ function App() {
       return;
     }
 
-    // Validate API key format
-    if (!apiKey.startsWith('sk-ant-api03-')) {
-      setError('Invalid API key format. Anthropic API keys should start with "sk-ant-api03-"');
-      return;
-    }
-
     setValidatingKey(true);
     setError('');
 
@@ -247,16 +241,16 @@ function App() {
       );
       
       // Limit to 20 for demo/cost efficiency
-      const limitedFiltered = filtered.slice(0, 20);
+      const filteredTest = filtered.slice(0, 20);
       
-      if (limitedFiltered.length === 0) {
+      if (filtered.length === 0) {
         throw new Error('No writing-related messages found in selected range');
       }
       
       setProcessingSteps(prev => [
         ...prev, 
         `✓ Found ${filtered.length} writing messages`,
-        `📊 Using ${limitedFiltered.length} messages for Stage 2 confirmation`
+        `📊 Using ${filtered.length} messages for Stage 2 confirmation`
       ]);
       
       // Step 3: Stage 2 - LLM Confirmation
@@ -264,7 +258,7 @@ function App() {
       setProcessingSteps(prev => [...prev, '🤖 Step 3: LLM confirmation filtering...']);
       
       const confirmed = await api.filterRelevantMessagesLLM(
-        limitedFiltered.map(msg => ({ id: msg.id, text: msg.text })),
+        filtered.map(msg => ({ id: msg.id, text: msg.text })),
         10, // batch size
         (status) => {
           setProgress(prev => ({ ...prev, stage: status }));
@@ -283,7 +277,7 @@ function App() {
       
       setProcessingSteps(prev => [
         ...prev,
-        `✓ Confirmed ${confirmed.length}/${limitedFiltered.length} messages as writing-related`,
+        `✓ Confirmed ${confirmed.length}/${filtered.length} messages as writing-related`,
         `📊 Proceeding with ${confirmed.length} messages for evaluation`
       ]);
       
@@ -474,16 +468,16 @@ function App() {
         }
       );
       
-      const limitedFiltered = filtered.slice(0, 20);
+      const filterTest = filtered.slice(0, 20);
       
-      if (limitedFiltered.length === 0) {
+      if (filtered.length === 0) {
         throw new Error('No writing-related messages found in selected conversations');
       }
       
       setProcessingSteps(prev => [
         ...prev,
         `✓ Found ${filtered.length} writing messages`,
-        `📊 Processing ${limitedFiltered.length} messages for evaluation`
+        `📊 Processing ${filtered.length} messages for evaluation`
       ]);
       
       // Step 3: LLM Confirmation
@@ -491,7 +485,7 @@ function App() {
       setProcessingSteps(prev => [...prev, '🤖 LLM confirmation filtering...']);
       
       const confirmed = await api.filterRelevantMessagesLLM(
-        limitedFiltered.map(msg => ({ id: msg.id, text: msg.text })),
+        filtered.map(msg => ({ id: msg.id, text: msg.text })),
         10,
         (status) => {
           setProgress(prev => ({ ...prev, stage: status }));

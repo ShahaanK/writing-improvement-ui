@@ -73,77 +73,47 @@ export interface Analysis {
 
 export class AnthropicAPI {
   private apiKey: string;
-  private requestQueue: Array<() => Promise<any>> = [];
-  private isProcessing = false;
-  private lastRequestTime = 0;
-  private readonly MIN_REQUEST_INTERVAL = 1000; // 1 second between requests
-  private readonly MODEL = 'claude-haiku-4-5-20251001'; // Haiku 4.5 - fast & cost-effective
+  private readonly MODEL = 'claude-haiku-4-5-20251001';
+  // Sliding window rate limiter (5 requests per minute)
+  private requestTimestamps: number[] = [];
+  private readonly MAX_REQUESTS_PER_MINUTE = 5;
+  private readonly TIME_WINDOW_MS = 60000; // 1 minute
   
   constructor(apiKey: string) {
     this.apiKey = apiKey;
   }
   
   /**
-   * Queue a request to respect rate limits
+   * Wait if necessary to respect 5 requests per minute limit
    */
-  private async queueRequest<T>(request: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      this.requestQueue.push(async () => {
-        try {
-          const result = await request();
-          resolve(result);
-        } catch (error) {
-          reject(error);
-        }
-      });
-      
-      this.processQueue();
-    });
-  }
-  
-  /**
-   * Process queued requests with rate limiting
-   */
-  private async processQueue() {
-    if (this.isProcessing || this.requestQueue.length === 0) {
-      return;
-    }
+  private async waitForRateLimit(): Promise<void> {
+    const now = Date.now();
     
-    this.isProcessing = true;
+    // Remove timestamps older than 1 minute
+    this.requestTimestamps = this.requestTimestamps.filter(
+      timestamp => now - timestamp < this.TIME_WINDOW_MS
+    );
     
-    while (this.requestQueue.length > 0) {
-      const now = Date.now();
-      const timeSinceLastRequest = now - this.lastRequestTime;
+    // If we've hit the limit, wait for the oldest request to expire
+    if (this.requestTimestamps.length >= this.MAX_REQUESTS_PER_MINUTE) {
+      const oldestRequest = this.requestTimestamps[0];
+      const waitTime = this.TIME_WINDOW_MS - (now - oldestRequest) + 1000; // +1 sec buffer
       
-      // Wait if needed to respect rate limit
-      if (timeSinceLastRequest < this.MIN_REQUEST_INTERVAL) {
-        const waitTime = this.MIN_REQUEST_INTERVAL - timeSinceLastRequest;
+      if (waitTime > 0) {
+        const waitSeconds = (waitTime / 1000).toFixed(1);
+        console.log(`  Rate limit: ${this.requestTimestamps.length}/${this.MAX_REQUESTS_PER_MINUTE} requests in last minute`);
+        console.log(`   Waiting ${waitSeconds} seconds before next request...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
-      }
-      
-      const request = this.requestQueue.shift();
-      if (request) {
-        await request();
-        this.lastRequestTime = Date.now();
+        
+        // Clean up again after waiting
+        this.requestTimestamps = this.requestTimestamps.filter(
+          timestamp => Date.now() - timestamp < this.TIME_WINDOW_MS
+        );
       }
     }
     
-    this.isProcessing = false;
-  }
-  
-  /**
-   * Get estimated wait time for queued requests
-   */
-  getEstimatedWaitTime(): number {
-    const queuedRequests = this.requestQueue.length;
-    return (queuedRequests * this.MIN_REQUEST_INTERVAL) / 1000; // in seconds
-  }
-  
-  /**
-   * Get number of requests in queue
-   */
-  getQueueLength(): number {
-    return this.requestQueue.length;
+    // Record this request timestamp
+    this.requestTimestamps.push(Date.now());
   }
   
   /**
@@ -152,10 +122,10 @@ export class AnthropicAPI {
   async testConnection(): Promise<boolean> {
     try {
       const response = await this.callClaude('Respond with just "OK"', 10);
-      console.log('âœ… API connection successful');
+      console.log(' API connection successful');
       return true;
     } catch (error: any) {
-      console.error('âŒ API connection failed:', error.message);
+      console.error(' API connection failed:', error.message);
       return false;
     }
   }
@@ -163,15 +133,17 @@ export class AnthropicAPI {
   /**
    * Call Claude API with a prompt
    */
-  async callClaude(
+async callClaude(
     prompt: string,
     maxTokens: number = 4000,
     onProgress?: (status: string) => void
   ): Promise<string> {
-    return this.queueRequest(async () => {
-      if (onProgress) {
-        onProgress('Sending request to Claude...');
-      }
+    // Wait for rate limit before making request
+    await this.waitForRateLimit();
+    
+    if (onProgress) {
+      onProgress('Sending request to Claude...');
+    }
       
       const requestBody = {
         model: this.MODEL,
@@ -220,8 +192,8 @@ export class AnthropicAPI {
       // Extract text from response
       const textContent = data.content.find((block: any) => block.type === 'text');
       return textContent ? textContent.text : '';
-    });
   }
+
   
   /**
    * Stage 2: LLM Confirmation Filtering (Batched)
@@ -240,7 +212,7 @@ export class AnthropicAPI {
       onProgress(`Stage 2: LLM confirmation (${totalBatches} batches)...`);
     }
     
-    console.log(`ðŸ¤– Stage 2: LLM Confirmation - ${messages.length} messages in ${totalBatches} batches`);
+    console.log(` Stage 2: LLM Confirmation - ${messages.length} messages in ${totalBatches} batches`);
     
     for (let i = 0; i < messages.length; i += batchSize) {
       const batch = messages.slice(i, i + batchSize);
@@ -299,7 +271,7 @@ NO markdown, NO explanations:
         
         // Ensure we have the right number of results
         if (!Array.isArray(results) || results.length !== batch.length) {
-          console.warn(`âš ï¸ Expected ${batch.length} results, got ${Array.isArray(results) ? results.length : 'non-array'}. Keeping all in batch.`);
+          console.warn(` Expected ${batch.length} results, got ${Array.isArray(results) ? results.length : 'non-array'}. Keeping all in batch.`);
           relevant.push(...batch);
         } else {
           // Filter relevant messages
@@ -310,31 +282,24 @@ NO markdown, NO explanations:
           });
           
           const relevantCount = results.filter((r: boolean) => r === true).length;
-          console.log(`  âœ… Batch ${batchNum}: ${relevantCount}/${batch.length} confirmed relevant`);
+          console.log(`Batch ${batchNum}: ${relevantCount}/${batch.length} confirmed relevant`);
         }
         
       } catch (error) {
-        console.error(`  âŒ Error processing batch ${batchNum}:`, error);
+        console.error(`   Error processing batch ${batchNum}:`, error);
         console.error(`  Error details:`, error instanceof Error ? error.message : String(error));
         console.log(`  Defaulting to keeping all messages in this batch`);
         relevant.push(...batch);
       }
       
-      // Rate limit: Wait 60 seconds after every 4 batches (5 req/min limit)
-      if (batchNum % 4 === 0 && batchNum < totalBatches) {
-        if (onProgress) {
-          onProgress(`â¸ï¸ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
-        }
-        console.log(`  â¸ï¸ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
-        await new Promise(resolve => setTimeout(resolve, 60000));
-      }
+    // Rate limiting is now handled automatically by waitForRateLimit() in callClaude()
     }
     
     const confirmationRate = (relevant.length / messages.length) * 100;
-    console.log(`\nâœ… Stage 2 Complete!`);
-    console.log(`  â€¢ Confirmed relevant: ${relevant.length}`);
-    console.log(`  â€¢ Filtered out: ${messages.length - relevant.length}`);
-    console.log(`  â€¢ Confirmation rate: ${confirmationRate.toFixed(1)}%\n`);
+    console.log(`\n Stage 2 Complete!`);
+    console.log(`   Confirmed relevant: ${relevant.length}`);
+    console.log(`   Filtered out: ${messages.length - relevant.length}`);
+    console.log(`   Confirmation rate: ${confirmationRate.toFixed(1)}%\n`);
     
     return relevant;
   }
@@ -352,7 +317,7 @@ NO markdown, NO explanations:
     const allResults: EvaluationResult[] = [];
     const totalBatches = Math.ceil(messages.length / batchSize);
     
-    console.log(`\nðŸ“Š Stage 3: Detailed Evaluation - ${messages.length} messages in ${totalBatches} batches`);
+    console.log(`\n Stage 3: Detailed Evaluation - ${messages.length} messages in ${totalBatches} batches`);
     
     for (let i = 0; i < messages.length; i += batchSize) {
       const batch = messages.slice(i, i + batchSize);
@@ -400,11 +365,11 @@ NO markdown, NO explanations, ONLY the JSON array:
         response = await this.callClaude(prompt, 4000, onProgress);
         cleanedResponse = this.cleanJSONResponse(response);
         
-        console.log(`\nðŸ”¥ Batch ${batchNum} Raw Response (first 600 chars):`);
+        console.log(`\n Batch ${batchNum} Raw Response (first 600 chars):`);
         console.log(response.substring(0, 600));
-        console.log(`\nðŸ§¹ Batch ${batchNum} Cleaned Response (first 600 chars):`);
+        console.log(`\n Batch ${batchNum} Cleaned Response (first 600 chars):`);
         console.log(cleanedResponse.substring(0, 600));
-        console.log(`\nðŸ” Attempting to parse...`);
+        console.log(`\n Attempting to parse...`);
         
         const batchResults = JSON.parse(cleanedResponse);
         
@@ -444,13 +409,13 @@ NO markdown, NO explanations, ONLY the JSON array:
           }
         }
         
-        console.log(`  âœ… Batch ${batchNum}: Successfully parsed ${batchResults.length} results`);
+        console.log(`   Batch ${batchNum}: Successfully parsed ${batchResults.length} results`);
         console.log(`     Mapped to ${batch.length} messages with IDs`);
         
       } catch (error) {
-        console.error(`  âŒ Error parsing batch ${batchNum} results:`, error);
-        console.error('ðŸ“„ Full raw response:', response);
-        console.error('ðŸ§¹ Full cleaned response:', cleanedResponse);
+        console.error(`   Error parsing batch ${batchNum} results:`, error);
+        console.error(' Full raw response:', response);
+        console.error(' Full cleaned response:', cleanedResponse);
         
         // Add placeholder results for failed batch with proper message mapping
         for (let j = 0; j < batch.length; j++) {
@@ -468,24 +433,17 @@ NO markdown, NO explanations, ONLY the JSON array:
         }
       }
       
-      // Rate limit: Wait 60 seconds after every 4 batches (5 req/min limit)
-      if (batchNum % 4 === 0 && batchNum < totalBatches) {
-        if (onProgress) {
-          onProgress(`â¸ï¸ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
-        }
-        console.log(`  â¸ï¸ Rate limit: Waiting 60 seconds... (${batchNum}/${totalBatches} batches complete)`);
-        await new Promise(resolve => setTimeout(resolve, 60000));
-      }
+    // Rate limiting is now handled automatically by waitForRateLimit() in callClaude() 
     }
     
-    console.log(`\nâœ… Stage 3 Complete!`);
-    console.log(`  â€¢ Total evaluations: ${allResults.length}`);
-    console.log(`  â€¢ All messages have message_id and text preserved`);
+    console.log(`\n Stage 3 Complete!`);
+    console.log(`   Total evaluations: ${allResults.length}`);
+    console.log(`   All messages have message_id and text preserved`);
     
     // Validate that all results have required fields
     const invalidResults = allResults.filter(r => !r.message_id || !r.text);
     if (invalidResults.length > 0) {
-      console.warn(`âš ï¸ WARNING: ${invalidResults.length} results missing message_id or text`);
+      console.warn(` WARNING: ${invalidResults.length} results missing message_id or text`);
     }
     
     return allResults;
@@ -571,15 +529,15 @@ Respond with ONLY valid JSON (no markdown, no preamble, no explanation):
       
       // CRITICAL: Validate that we got at least 1 issue per category (matches reference lines 547-567)
       if (!analysis.top_grammar_issues || analysis.top_grammar_issues.length < 1) {
-        console.warn('âš ï¸ No grammar issues returned by API, generating fallback');
+        console.warn(' No grammar issues returned by API, generating fallback');
         analysis.top_grammar_issues = this.generateFallbackIssues(allGrammarIssues, 'grammar').slice(0, 5);
       }
       if (!analysis.top_punctuation_issues || analysis.top_punctuation_issues.length < 1) {
-        console.warn('âš ï¸ No punctuation issues returned by API, generating fallback');
+        console.warn(' No punctuation issues returned by API, generating fallback');
         analysis.top_punctuation_issues = this.generateFallbackIssues(allPunctuationIssues, 'punctuation').slice(0, 5);
       }
       if (!analysis.top_tone_issues || analysis.top_tone_issues.length < 1) {
-        console.warn('âš ï¸ No tone issues returned by API, generating fallback');
+        console.warn(' No tone issues returned by API, generating fallback');
         analysis.top_tone_issues = this.generateFallbackIssues(allToneIssues, 'tone').slice(0, 5);
       }
       
@@ -588,14 +546,14 @@ Respond with ONLY valid JSON (no markdown, no preamble, no explanation):
       analysis.top_punctuation_issues = analysis.top_punctuation_issues.slice(0, 5);
       analysis.top_tone_issues = analysis.top_tone_issues.slice(0, 5);
       
-      console.log(`âœ… Analysis complete:
-  â€¢ Grammar issues: ${analysis.top_grammar_issues.length}
-  â€¢ Punctuation issues: ${analysis.top_punctuation_issues.length}
-  â€¢ Tone issues: ${analysis.top_tone_issues.length}`);
+      console.log(` Analysis complete:
+   Grammar issues: ${analysis.top_grammar_issues.length}
+   Punctuation issues: ${analysis.top_punctuation_issues.length}
+   Tone issues: ${analysis.top_tone_issues.length}`);
       
       return analysis;
     } catch (error) {
-      console.error('âŒ Error analyzing patterns:', error);
+      console.error(' Error analyzing patterns:', error);
       // Return fallback analysis with at least 1 issue per category (max 5)
       return {
         summary: {
@@ -730,7 +688,7 @@ Respond with ONLY valid JSON array (no markdown):
           question: idx + 1,
           issue: q.specific_issue,
           correct: isCorrect,
-          feedback: isCorrect ? 'Correct! âœ“' : `Incorrect. The correct answer is ${correctLetter}.`,
+          feedback: isCorrect ? 'Correct! ' : `Incorrect. The correct answer is ${correctLetter}.`,
           correct_answer: q.correct_answer,
           explanation: q.explanation,
           grading_method: 'programmatic'
@@ -750,7 +708,7 @@ Respond with ONLY valid JSON array (no markdown):
             question: idx + 1,
             issue: q.specific_issue,
             correct: true,
-            feedback: 'Correct! âœ“',
+            feedback: 'Correct! ',
             correct_answer: q.correct_answer,
             explanation: q.explanation,
             grading_method: 'similarity'
@@ -761,7 +719,7 @@ Respond with ONLY valid JSON array (no markdown):
             question: idx + 1,
             issue: q.specific_issue,
             correct: true,
-            feedback: 'Correct! Minor wording differences are acceptable. âœ“',
+            feedback: 'Correct! Minor wording differences are acceptable. ',
             correct_answer: q.correct_answer,
             explanation: q.explanation,
             grading_method: 'similarity'
@@ -892,10 +850,10 @@ Respond with ONLY valid JSON array of ${needsLLM.length} results in SAME ORDER (
     
     // Log for debugging
     if (!cleaned.startsWith('[') && !cleaned.startsWith('{')) {
-      console.warn('âš ï¸ Cleaned JSON does not start with [ or {:', cleaned.substring(0, 50));
+      console.warn(' Cleaned JSON does not start with [ or {:', cleaned.substring(0, 50));
     }
     if (!cleaned.endsWith(']') && !cleaned.endsWith('}')) {
-      console.warn('âš ï¸ Cleaned JSON does not end with ] or }:', cleaned.substring(cleaned.length - 50));
+      console.warn(' Cleaned JSON does not end with ] or }:', cleaned.substring(cleaned.length - 50));
     }
     
     return cleaned;
